@@ -28,6 +28,9 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ValueEventListener
+import com.google.firebase.database.DatabaseError
 
 data class Reservation(
     val id: String = "",
@@ -38,6 +41,13 @@ data class Reservation(
     val endTime: String = "",
     val status: String = "active",
     val createdAt: Long = System.currentTimeMillis()
+)
+
+data class RoomStatus(
+    val name: String = "",
+    val status: String = "available",
+    val occupiedBy: String = "",
+    val lastUpdated: Long = 0L
 )
 
 class MainActivity : ComponentActivity() {
@@ -205,14 +215,19 @@ fun RegisterScreen(onRegisterSuccess: () -> Unit, onGoToLogin: () -> Unit) {
 @Composable
 fun ReservationListScreen(onLogout: () -> Unit) {
     val db = FirebaseFirestore.getInstance()
+    val realtimeDb = FirebaseDatabase.getInstance("https://studyroombookingapp-default-rtdb.europe-west1.firebasedatabase.app")
     val userId = FirebaseAuth.getInstance().currentUser?.uid ?: ""
+    val userEmail = FirebaseAuth.getInstance().currentUser?.email ?: ""
     var reservations by remember { mutableStateOf(listOf<Reservation>()) }
+    var roomStatuses by remember { mutableStateOf(mapOf<String, RoomStatus>()) }
     var showAddDialog by remember { mutableStateOf(false) }
     var editingReservation by remember { mutableStateOf<Reservation?>(null) }
     var deleteReservation by remember { mutableStateOf<Reservation?>(null) }
+    var showRoomStatus by remember { mutableStateOf(false) }
     var filterStatus by remember { mutableStateOf("All") }
     val context = LocalContext.current
 
+    // Firestore listener for reservations
     DisposableEffect(userId) {
         val listener: ListenerRegistration = db.collection("reservations")
             .whereEqualTo("userId", userId)
@@ -234,6 +249,27 @@ fun ReservationListScreen(onLogout: () -> Unit) {
         onDispose { listener.remove() }
     }
 
+    // Realtime Database listener for room statuses
+    DisposableEffect(Unit) {
+        val roomRef = realtimeDb.reference.child("rooms")
+        val roomListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
+                val statuses = mutableMapOf<String, RoomStatus>()
+                snapshot.children.forEach { child ->
+                    val name = child.child("name").getValue(String::class.java) ?: child.key ?: ""
+                    val status = child.child("status").getValue(String::class.java) ?: "available"
+                    val occupiedBy = child.child("occupiedBy").getValue(String::class.java) ?: ""
+                    val lastUpdated = child.child("lastUpdated").getValue(Long::class.java) ?: 0L
+                    statuses[child.key ?: ""] = RoomStatus(name, status, occupiedBy, lastUpdated)
+                }
+                roomStatuses = statuses
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        roomRef.addValueEventListener(roomListener)
+        onDispose { roomRef.removeEventListener(roomListener) }
+    }
+
     val filtered = when (filterStatus) {
         "Active" -> reservations.filter { it.status == "active" }
         "Cancelled" -> reservations.filter { it.status == "cancelled" }
@@ -245,62 +281,179 @@ fun ReservationListScreen(onLogout: () -> Unit) {
             TopAppBar(
                 title = { Text("My Reservations") },
                 actions = {
+                    TextButton(onClick = { showRoomStatus = !showRoomStatus }) {
+                        Text(if (showRoomStatus) "My Bookings" else "Room Status", color = MaterialTheme.colorScheme.primary)
+                    }
                     TextButton(onClick = onLogout) { Text("Logout", color = MaterialTheme.colorScheme.error) }
                 }
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { showAddDialog = true }) {
-                Icon(Icons.Default.Add, "Add reservation")
+            if (!showRoomStatus) {
+                FloatingActionButton(onClick = { showAddDialog = true }) {
+                    Icon(Icons.Default.Add, "Add reservation")
+                }
             }
         }
     ) { padding ->
-        Column(modifier = Modifier.padding(padding)) {
-            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("All", "Active", "Cancelled").forEach { status ->
-                    FilterChip(
-                        selected = filterStatus == status,
-                        onClick = { filterStatus = status },
-                        label = { Text(status) }
-                    )
+        if (showRoomStatus) {
+            // Room Status View - Realtime Database
+            Column(modifier = Modifier.padding(padding)) {
+                Text(
+                    "Live Room Status",
+                    fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(16.dp)
+                )
+                if (roomStatuses.isEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text("No rooms added yet.", color = Color.Gray)
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = {
+                            // Add sample rooms to Realtime Database
+                            val roomRef = realtimeDb.reference.child("rooms")
+                            val sampleRooms = listOf("Room A", "Room B", "Room C", "Room D")
+                            sampleRooms.forEach { roomName ->
+                                val key = roomName.replace(" ", "_").lowercase()
+                                roomRef.child(key).setValue(
+                                    mapOf(
+                                        "name" to roomName,
+                                        "status" to "available",
+                                        "occupiedBy" to "",
+                                        "lastUpdated" to System.currentTimeMillis()
+                                    )
+                                )
+                            }
+                            Toast.makeText(context, "Sample rooms added!", Toast.LENGTH_SHORT).show()
+                        }) {
+                            Text("Add Sample Rooms")
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(roomStatuses.entries.toList()) { (key, room) ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (room.status == "available")
+                                        Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text(room.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                                        Text(
+                                            if (room.status == "available") "Available"
+                                            else "Occupied by ${room.occupiedBy}",
+                                            fontSize = 14.sp,
+                                            color = if (room.status == "available") Color(0xFF2E7D32) else Color(0xFFC62828)
+                                        )
+                                    }
+                                    Button(
+                                        onClick = {
+                                            val roomRef = realtimeDb.reference.child("rooms").child(key)
+                                            if (room.status == "available") {
+                                                roomRef.setValue(
+                                                    mapOf(
+                                                        "name" to room.name,
+                                                        "status" to "occupied",
+                                                        "occupiedBy" to userEmail,
+                                                        "lastUpdated" to System.currentTimeMillis()
+                                                    )
+                                                )
+                                            } else {
+                                                roomRef.setValue(
+                                                    mapOf(
+                                                        "name" to room.name,
+                                                        "status" to "available",
+                                                        "occupiedBy" to "",
+                                                        "lastUpdated" to System.currentTimeMillis()
+                                                    )
+                                                )
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (room.status == "available")
+                                                Color(0xFF2E7D32) else Color(0xFFC62828)
+                                        )
+                                    ) {
+                                        Text(
+                                            if (room.status == "available") "Check In" else "Check Out",
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-
-            if (filtered.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No reservations yet.\nTap + to add one.", textAlign = TextAlign.Center, color = Color.Gray)
+        } else {
+            // Reservations View - Firestore
+            Column(modifier = Modifier.padding(padding)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf("All", "Active", "Cancelled").forEach { status ->
+                        FilterChip(
+                            selected = filterStatus == status,
+                            onClick = { filterStatus = status },
+                            label = { Text(status) }
+                        )
+                    }
                 }
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(filtered) { res ->
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text(res.roomName, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                                    Text(
-                                        res.status.uppercase(),
-                                        color = if (res.status == "active") Color(0xFF2E7D32) else Color(0xFFC62828),
-                                        fontWeight = FontWeight.Bold, fontSize = 12.sp
-                                    )
-                                }
-                                Spacer(Modifier.height(4.dp))
-                                Text("Date: ${res.date}", fontSize = 14.sp, color = Color.Gray)
-                                Text("Time: ${res.startTime} - ${res.endTime}", fontSize = 14.sp, color = Color.Gray)
-                                Spacer(Modifier.height(8.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    IconButton(onClick = { editingReservation = res }) {
-                                        Icon(Icons.Default.Edit, "Edit", tint = MaterialTheme.colorScheme.primary)
+
+                if (filtered.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No reservations yet.\nTap + to add one.", textAlign = TextAlign.Center, color = Color.Gray)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filtered) { res ->
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(res.roomName, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                                        Text(
+                                            res.status.uppercase(),
+                                            color = if (res.status == "active") Color(0xFF2E7D32) else Color(0xFFC62828),
+                                            fontWeight = FontWeight.Bold, fontSize = 12.sp
+                                        )
                                     }
-                                    IconButton(onClick = { deleteReservation = res }) {
-                                        Icon(Icons.Default.Delete, "Delete", tint = MaterialTheme.colorScheme.error)
-                                    }
-                                    TextButton(onClick = {
-                                        val newStatus = if (res.status == "active") "cancelled" else "active"
-                                        db.collection("reservations").document(res.id).update("status", newStatus)
-                                    }) {
-                                        Text(if (res.status == "active") "Cancel" else "Reactivate", fontSize = 12.sp)
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("Date: ${res.date}", fontSize = 14.sp, color = Color.Gray)
+                                    Text("Time: ${res.startTime} - ${res.endTime}", fontSize = 14.sp, color = Color.Gray)
+                                    Spacer(Modifier.height(8.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        IconButton(onClick = { editingReservation = res }) {
+                                            Icon(Icons.Default.Edit, "Edit", tint = MaterialTheme.colorScheme.primary)
+                                        }
+                                        IconButton(onClick = { deleteReservation = res }) {
+                                            Icon(Icons.Default.Delete, "Delete", tint = MaterialTheme.colorScheme.error)
+                                        }
+                                        TextButton(onClick = {
+                                            val newStatus = if (res.status == "active") "cancelled" else "active"
+                                            db.collection("reservations").document(res.id).update("status", newStatus)
+                                        }) {
+                                            Text(if (res.status == "active") "Cancel" else "Reactivate", fontSize = 12.sp)
+                                        }
                                     }
                                 }
                             }
